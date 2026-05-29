@@ -1,6 +1,5 @@
 # ============================================================
-# daily_report.py  —  네이버 금융 크롤링 버전
-# 로그인 불필요 / 매일 오후 4시 GitHub Actions 자동 실행
+# daily_report.py  —  네이버 금융 크롤링 버전 v3
 # ============================================================
 import os, sys, time, requests, re
 from datetime import datetime, date, timedelta
@@ -11,7 +10,6 @@ from data.sector_db_v2 import SECTOR_DATABASE
 
 DISCORD_WEBHOOK = os.environ["DISCORD_WEBHOOK_URL"]
 
-# ── 네이버 금융 시세 수집 ─────────────────────────────────────
 SESSION = requests.Session()
 SESSION.headers.update({
     "User-Agent": (
@@ -22,7 +20,6 @@ SESSION.headers.update({
     "Referer": "https://finance.naver.com",
 })
 
-# 종목명 → 코드 매핑
 KNOWN_CODES = {
     "SK하이닉스":"000660","삼성전자":"005930",
     "HD현대일렉트릭":"267260","LS일렉트릭":"010120",
@@ -59,84 +56,101 @@ KNOWN_CODES = {
     "카카오":"035720","네이버":"035420","카카오게임즈":"293490",
     "펄어비스":"263750","엔씨소프트":"036570","위메이드":"112040",
     "더존비즈온":"012510","한글과컴퓨터":"030520",
-    "에코프로비엠":"247540","코스모신소재":"005070",
-    "에스티팜":"237690","셀트리온헬스케어":"091990",
-    "고영":"098460","레고켐바이오":"141080","오스템임플란트":"048260",
-    "HL만도":"204320","한온시스템":"018880","에스엘":"011810",
-    "뉴로메카":"462870","에스피지":"058610","이랜시스":"126340",
-    "두산퓨어셀":"336260","범한퓨어셀":"382900",
-    "HD현대중공업":"329180","삼성중공업":"010140",
-    "HMM":"011200","팬오션":"028670",
+    "코스모신소재":"005070","에스티팜":"237690",
+    "고영":"098460","오스템임플란트":"048260",
+    "한온시스템":"018880","에스엘":"011810",
+    "뉴로메카":"462870","이랜시스":"126340",
+    "범한퓨어셀":"382900","HD현대중공업":"329180",
+    "삼성중공업":"010140","팬오션":"028670",
     "GS건설":"006360","DL이앤씨":"375500",
+    "두산에너빌리티":"034020","한화시스템":"272210",
+    "현대로템":"064350","풍산":"103140",
 }
 
-_price_cache: dict[str, dict] = {}
+_price_cache: dict = {}
 
-def get_code(name: str) -> str | None:
+def get_code(name: str):
     return KNOWN_CODES.get(name)
 
-def get_price_naver(code: str) -> dict | None:
-    """네이버 금융 API로 시세 조회"""
+def get_price_naver(code: str):
+    """네이버 금융 시세 조회 — 종목 상세 페이지 파싱"""
     if code in _price_cache:
         return _price_cache[code]
     try:
-        url = f"https://finance.naver.com/item/sise.naver?code={code}"
-        r = SESSION.get(url, timeout=8)
+        url = f"https://finance.naver.com/item/main.naver?code={code}"
+        r = SESSION.get(url, timeout=10)
         html = r.text
 
         # 현재가
-        close_match = re.search(r'<strong[^>]*id="_nowVal"[^>]*>([\d,]+)<', html)
+        close = 0
+        m = re.search(r'<p class="no_today">.*?<span class="blind">([0-9,]+)</span>', html, re.DOTALL)
+        if m:
+            close = int(m.group(1).replace(",", ""))
+
         # 등락률
-        rate_match  = re.search(r'<strong[^>]*id="_rate"[^>]*><span[^>]*>([-\d.]+)</span>', html)
-        # 거래량 (네이버 금융 API 사용)
-        api_url = f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code}"
-        api_r = SESSION.get(api_url, timeout=5)
-        api_data = api_r.json()
-        stock_info = api_data.get("datas", [{}])[0] if api_data.get("datas") else {}
+        chg = 0.0
+        m2 = re.search(r'<span class="[^"]*blind[^"]*">[+-]?([\d.]+)%</span>', html)
+        if m2:
+            chg_raw = float(m2.group(1))
+            # 상승/하락 판단
+            if "fall" in html[max(0, m2.start()-200):m2.start()]:
+                chg = -chg_raw
+            else:
+                chg = chg_raw
 
-        close  = int(str(stock_info.get("closePrice", "0")).replace(",","")) if stock_info else 0
-        chg    = float(stock_info.get("fluctuationsRatio", 0)) if stock_info else 0
-        volume = int(str(stock_info.get("accumulatedTradingVolume","0")).replace(",","")) if stock_info else 0
-        tv     = int(str(stock_info.get("accumulatedTradingValue","0")).replace(",","")) if stock_info else 0
-
-        if close == 0 and close_match:
-            close = int(close_match.group(1).replace(",",""))
-        if chg == 0 and rate_match:
-            chg = float(rate_match.group(1))
+        # 거래량/거래대금 — 네이버 시세 API
+        api = f"https://m.stock.naver.com/api/stock/{code}/basic"
+        ar = SESSION.get(api, timeout=8)
+        if ar.status_code == 200:
+            aj = ar.json()
+            close  = int(str(aj.get("closePrice","0")).replace(",","")) or close
+            chg    = float(aj.get("fluctuationsRatio", chg) or chg)
+            volume = int(str(aj.get("accumulatedTradingVolume","0")).replace(",",""))
+            tv     = int(str(aj.get("accumulatedTradingValue","0")).replace(",",""))
+        else:
+            volume = 0
+            tv     = 0
 
         result = {
-            "close": close,
-            "change_rate": round(chg, 2),
-            "volume": volume,
+            "close":         close,
+            "change_rate":   round(chg, 2),
+            "volume":        volume,
             "trading_value": tv,
         }
         _price_cache[code] = result
         return result
     except Exception as e:
+        print(f"  [시세오류] {code}: {e}")
         return None
 
-def get_avg_vol_5d_naver(code: str) -> float:
-    """네이버 금융 일봉에서 5일 평균 거래량"""
+def get_avg_vol_5d(code: str) -> float:
+    """네이버 일봉 XML에서 5일 평균 거래량"""
     try:
-        url = f"https://fchart.stock.naver.com/sise.nhn?symbol={code}&timeframe=day&count=10&requestType=0"
+        url = (
+            f"https://fchart.stock.naver.com/sise.nhn"
+            f"?symbol={code}&timeframe=day&count=10&requestType=0"
+        )
         r = SESSION.get(url, timeout=8)
-        # XML 파싱
-        volumes = re.findall(r'<item data="[^|]+\|[^|]+\|[^|]+\|[^|]+\|([^|]+)\|', r.text)
-        vols = [int(v) for v in volumes if v.isdigit()]
-        if len(vols) < 2:
+        vols = re.findall(r'<item data="[^|]*\|[^|]*\|[^|]*\|[^|]*\|(\d+)\|', r.text)
+        nums = [int(v) for v in vols if int(v) > 0]
+        if len(nums) < 2:
             return 0
-        return sum(vols[-6:-1]) / min(5, len(vols)-1)
+        # 오늘 제외 최근 5일
+        past = nums[:-1][-5:]
+        return sum(past) / len(past)
     except Exception:
         return 0
 
 def is_golden(chg: float, vol: int, avg5: float, tv: int = 0) -> bool:
+    """순환매 황금별 조건"""
     return (
         (-2.0 <= chg <= 3.0) and
         (avg5 > 0) and
         (vol <= avg5 * 0.40) and
-        (tv >= 5_000_000_000)   # 거래대금 50억 이상
+        (tv >= 5_000_000_000)
     )
-# ── Discord 전송 ──────────────────────────────────────────────
+
+# ── Discord ───────────────────────────────────────────────────
 def discord_send(payload: dict):
     r = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
     if r.status_code not in (200, 204):
@@ -145,15 +159,17 @@ def discord_send(payload: dict):
 
 def send_embed(title: str, desc: str, color: int, fields: list = None):
     embed = {
-        "title": title, "description": desc, "color": color,
+        "title": title,
+        "description": desc,
+        "color": color,
         "timestamp": datetime.utcnow().isoformat(),
-        "footer": {"text": f"순환매 상황실 | 네이버금융 | {date.today().strftime('%Y-%m-%d')}"},
+        "footer": {"text": f"순환매 상황실 | {date.today().strftime('%Y-%m-%d')}"},
     }
     if fields:
         embed["fields"] = fields
     discord_send({"embeds": [embed]})
 
-def chunk_lines(lines: list[str], max_chars=1800) -> list[str]:
+def chunk_lines(lines: list, max_chars: int = 1800) -> list:
     chunks, cur = [], ""
     for line in lines:
         if len(cur) + len(line) + 1 > max_chars:
@@ -172,10 +188,9 @@ def run():
     print(f" 순환매 상황실  {today_str}")
     print(f"{'='*50}\n")
 
-    # ── 1. 대장주 시세 수집 ─────────────────────────────────
+    # 1. 대장주 시세 수집
     print(f"[{datetime.now():%H:%M:%S}] 대장주 시세 수집...")
-    leader_tv: dict[str, int] = {}
-
+    leader_tv = {}
     for key, sec in SECTOR_DATABASE.items():
         total = 0
         for name in sec.get("대장주", []):
@@ -185,60 +200,57 @@ def run():
             d = get_price_naver(code)
             if d:
                 total += d.get("trading_value", 0)
-            time.sleep(0.1)
+            time.sleep(0.15)
         leader_tv[key] = total
 
     base = leader_tv.get("01_반도체_AI", 1) or 1
     tv_ratios = {k: v / base * 100 for k, v in leader_tv.items()}
 
-    # ── 2. PASS/FAIL 판정 ────────────────────────────────────
+    # 2. PASS/FAIL 판정
     pass_sectors, fail_sectors, sector_lines = [], [], []
-
     for key, sec in SECTOR_DATABASE.items():
         label   = sec["label"]
         ratio   = tv_ratios.get(key, 0)
         pass_ok = ratio >= 40
         (pass_sectors if pass_ok else fail_sectors).append(label)
 
-        leader_chgs = []
+        chgs = []
         for name in sec.get("대장주", []):
             code = get_code(name)
-            d = get_price_naver(code) if code else None
-            chg = d["change_rate"] if d else 0
+            d    = get_price_naver(code) if code else None
+            chg  = d["change_rate"] if d else 0
             arrow = "🔺" if chg > 0 else ("🔻" if chg < 0 else "➡️")
-            leader_chgs.append(f"{name} {arrow}{chg:+.1f}%")
+            chgs.append(f"{name} {arrow}{chg:+.1f}%")
 
         icon = "🟢" if pass_ok else "🔴"
-        sector_lines.append(
-            f"{icon} **{label}** `{ratio:.0f}%`  |  " + "  ".join(leader_chgs)
-        )
+        sector_lines.append(f"{icon} **{label}** `{ratio:.0f}%`  |  " + "  ".join(chgs))
 
-    # ── 3. 섹터 현황 전송 ────────────────────────────────────
+    # 3. Discord 전송
     mid = len(sector_lines) // 2
     send_embed(
         title  = f"📡 순환매 상황실 — {today_str} 마감 리포트",
         desc   = f"🟢 PASS: **{len(pass_sectors)}개** | 🔴 FAIL: **{len(fail_sectors)}개**",
         color  = 0x00BFFF,
         fields = [
-            {"name":"📊 섹터 현황 (1/2)", "value":"\n".join(sector_lines[:mid]),  "inline":False},
-            {"name":"📊 섹터 현황 (2/2)", "value":"\n".join(sector_lines[mid:]), "inline":False},
+            {"name": "📊 섹터 현황 (1/2)", "value": "\n".join(sector_lines[:mid]),  "inline": False},
+            {"name": "📊 섹터 현황 (2/2)", "value": "\n".join(sector_lines[mid:]), "inline": False},
         ],
     )
     time.sleep(1)
     send_embed(
-        title = "✅ PASS 섹터 — 자금 유입 중",
+        title = "✅ PASS 섹터",
         desc  = "\n".join([f"🟢 {s}" for s in pass_sectors]) or "없음",
         color = 0x00AA00,
     )
     time.sleep(1)
     send_embed(
-        title = "❌ FAIL 섹터 — 소외",
+        title = "❌ FAIL 섹터",
         desc  = "\n".join([f"🔴 {s}" for s in fail_sectors]) or "없음",
         color = 0xAA0000,
     )
     time.sleep(1)
 
-    # ── 4. 황금별 스캔 ──────────────────────────────────────
+    # 4. 황금별 스캔
     print(f"[{datetime.now():%H:%M:%S}] 황금별 스캔 시작...")
     targets = [
         (sec["label"], mid_name, sub_name, name)
@@ -249,6 +261,7 @@ def run():
     ]
 
     stars = []
+
     def _check(label, mid_name, sub_name, name):
         code = get_code(name)
         if not code:
@@ -256,37 +269,40 @@ def run():
         d = get_price_naver(code)
         if not d:
             return None
-        chg = d["change_rate"]
-        vol = d["volume"]
-        avg5 = get_avg_vol_5d_naver(code)
-   if is_golden(chg, vol, avg5, d.get("trading_value", 0)):
+        chg  = d["change_rate"]
+        vol  = d["volume"]
+        avg5 = get_avg_vol_5d(code)
+        tv   = d.get("trading_value", 0)
+        if is_golden(chg, vol, avg5, tv):
             return {
-                "sector": label, "sub": sub_name,
-                "name": name, "change_rate": chg,
-                "vol_ratio": (vol/avg5*100) if avg5 > 0 else 0,
+                "sector":      label,
+                "sub":         sub_name,
+                "name":        name,
+                "change_rate": chg,
+                "vol_ratio":   (vol / avg5 * 100) if avg5 > 0 else 0,
             }
         return None
 
     with ThreadPoolExecutor(max_workers=8) as ex:
         futs = [ex.submit(_check, *t) for t in targets]
         for i, f in enumerate(as_completed(futs)):
-            if (i+1) % 200 == 0:
+            if (i + 1) % 200 == 0:
                 print(f"  진행: {i+1}/{len(targets)}")
-            r = f.result()
-            if r:
-                stars.append(r)
+            result = f.result()
+            if result:
+                stars.append(result)
 
     print(f"[{datetime.now():%H:%M:%S}] 황금별 {len(stars)}개 감지")
 
-    # ── 5. 황금별 전송 ───────────────────────────────────────
+    # 5. 황금별 전송
     if not stars:
         send_embed(
             title = "⭐ 황금별 타점 — 오늘은 없음",
-            desc  = "조건 충족 종목 없음\n(등락률 ±1.5% & 거래량 5일평균 20% 이하)",
+            desc  = "조건 충족 종목 없음\n(등락률 -2%~+3% & 거래량 5일평균 40% 이하 & 거래대금 50억+)",
             color = 0x555555,
         )
     else:
-        by_sector: dict[str, list] = {}
+        by_sector = {}
         for s in sorted(stars, key=lambda x: x["sector"]):
             by_sector.setdefault(s["sector"], []).append(s)
 
@@ -303,14 +319,17 @@ def run():
         chunks = chunk_lines(star_lines)
         for i, chunk in enumerate(chunks):
             send_embed(
-                title = (f"⭐ 황금별 타점 {len(stars)}종목 ({i+1}/{len(chunks)})"
-                         if len(chunks) > 1 else f"⭐ 황금별 타점 총 {len(stars)}종목"),
+                title = (
+                    f"⭐ 황금별 타점 {len(stars)}종목 ({i+1}/{len(chunks)})"
+                    if len(chunks) > 1
+                    else f"⭐ 황금별 타점 총 {len(stars)}종목"
+                ),
                 desc  = chunk,
                 color = 0xFFD700,
             )
             time.sleep(1)
 
-    # ── 6. 마감 ─────────────────────────────────────────────
+    # 6. 마감
     send_embed(
         title = "📋 리포트 완료",
         desc  = (

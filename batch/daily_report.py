@@ -129,9 +129,13 @@ def get_avg_vol_5d_naver(code: str) -> float:
     except Exception:
         return 0
 
-def is_golden(chg: float, vol: int, avg5: float) -> bool:
-    return (-1.5 <= chg <= 1.5) and (avg5 > 0) and (vol <= avg5 * 0.20)
-
+def is_golden(chg: float, vol: int, avg5: float, tv: int = 0) -> bool:
+    return (
+        (-2.0 <= chg <= 3.0) and
+        (avg5 > 0) and
+        (vol <= avg5 * 0.40) and
+        (tv >= 5_000_000_000)   # 거래대금 50억 이상
+    )
 # ── Discord 전송 ──────────────────────────────────────────────
 def discord_send(payload: dict):
     r = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
@@ -255,7 +259,7 @@ def run():
         chg = d["change_rate"]
         vol = d["volume"]
         avg5 = get_avg_vol_5d_naver(code)
-        if is_golden(chg, vol, avg5):
+   if is_golden(chg, vol, avg5, d.get("trading_value", 0)):
             return {
                 "sector": label, "sub": sub_name,
                 "name": name, "change_rate": chg,

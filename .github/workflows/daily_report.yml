@@ -1,0 +1,46 @@
+name: 📡 순환매 일일 리포트
+
+on:
+  schedule:
+    - cron: "0 7 * * 1-5"   # 평일 KST 16:00 (UTC 07:00)
+  workflow_dispatch:         # 수동 실행 버튼
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 코드 가져오기
+        uses: actions/checkout@v4
+
+      - name: 🐍 Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 📦 패키지 설치
+        run: pip install pykrx requests pandas
+
+      - name: 📊 리포트 실행
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          echo "▶ 시작: $(TZ='Asia/Seoul' date)"
+          python batch/daily_report.py
+          echo "✅ 완료: $(TZ='Asia/Seoul' date)"
+
+      - name: 🚨 실패 알림
+        if: failure()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python - << 'PYEOF'
+          import os, requests, datetime
+          requests.post(os.environ["DISCORD_WEBHOOK_URL"], json={"embeds": [{
+              "title": "🚨 리포트 실행 실패",
+              "description": f"오류 발생 ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M')})\nActions 탭에서 로그 확인하세요.",
+              "color": 0xFF0000,
+          }]})
+          PYEOF

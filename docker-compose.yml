@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+  # ── 전광판 대시보드 ────────────────────────────────────────
+  dashboard:
+    build: .
+    container_name: stock-dashboard
+    ports:
+      - "8501:8501"
+    env_file: .env
+    restart: unless-stopped
+    command: >
+      streamlit run app.py
+      --server.port=8501
+      --server.address=0.0.0.0
+      --server.headless=true
+      --browser.gatherUsageStats=false
+
+  # ── 장중 감시 + 4시 리포트 스케줄러 ───────────────────────
+  scheduler:
+    build: .
+    container_name: stock-scheduler
+    env_file: .env
+    restart: unless-stopped
+    command: python scheduler/scheduler.py
+    depends_on:
+      - dashboard
